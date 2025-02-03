@@ -42,8 +42,8 @@ const Dictionary = enum {
 
     pub fn url(self: Dictionary) []const u8 {
         return switch (self) {
-            .unidic => "https://github.com/egegungordu/jaime/releases/download/v0.0.1/libjaime.wasm",
-            .ipadic => "https://github.com/egegungordu/jaime/releases/download/v0.0.1/libjaime.wasm",
+            .unidic => "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/unidic.bin",
+            .ipadic => "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/ipadic.bin",
         };
     }
 
