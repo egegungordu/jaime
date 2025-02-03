@@ -42,8 +42,8 @@ const Dictionary = enum {
 
     pub fn url(self: Dictionary) []const u8 {
         return switch (self) {
-            .unidic => "https://github.com/egegungordu/jaime/releases/download/v0.0.1/libjaime.wasm",
-            .ipadic => "https://github.com/egegungordu/jaime/releases/download/v0.0.1/libjaime.wasm",
+            .unidic => "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/unidic.bin",
+            .ipadic => "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/ipadic.bin",
         };
     }
 
@@ -139,6 +139,7 @@ pub fn build(b: *std.Build) void {
         std.debug.print("Checking dictionary file {s}\n", .{download_path});
         const access: ?void = blk: {
             std.fs.accessAbsolute(download_path, .{}) catch |err| {
+                std.debug.print("Dictionary file not found, starting download\n", .{});
                 switch (err) {
                     std.fs.Dir.AccessError.FileNotFound => {
                         std.debug.print("Downloading {s} from {s}\n", .{ @tagName(dic_fetch), dic_fetch.url() });
@@ -242,6 +243,8 @@ fn downloadUrl(b: *std.Build, url: []const u8, out: []const u8) void {
                 fatal("Unable to open '{s}': {s}\n", .{ out, @errorName(err) });
             };
             defer out_file.close();
+
+            std.debug.print("Writing {:.2} of data\n", .{std.fmt.fmtIntSizeDec(response.items.len)});
 
             out_file.writer().writeAll(response.items) catch |err| {
                 fatal("Someting went wrong while writing to file: {s}\n", .{@errorName(err)});
