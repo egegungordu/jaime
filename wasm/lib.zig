@@ -3,7 +3,7 @@ const mem = std.mem;
 
 extern "debug" fn consoleLog(arg: u32) void;
 
-const Ime = @import("ime_ipadic").Ime;
+const Ime = @import("ime").Ime;
 
 // TODO: There is a memory leak somewhere
 

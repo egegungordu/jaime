@@ -45,10 +45,6 @@ On the **web** with webassembly
 
 The minimum Zig version required is 0.13.0.
 
-## Licensing Information
-
-This project includes the **IPADIC dictionary**, which is provided under the license terms stated in the accompanying `COPYING` file. The IPADIC license imposes additional restrictions and requirements on its usage and redistribution. If your application cannot comply with the terms of the IPADIC license, consider using the `ime_core` module with a custom dictionary implementation instead.
-
 ## Integrating jaime into your Zig Project
 
 You can add jaime as a dependency in your `build.zig.zon` file in two ways:
@@ -70,15 +66,61 @@ zig fetch --save https://github.com/egegungordu/jaime/archive/refs/tags/vx.y.z.t
 Then instantiate the dependency in your `build.zig`:
 
 ```zig
-const jaime = b.dependency("jaime", .{});
-exe.root_module.addImport("kana", jaime.module("kana"));         // For simple kana conversion
-exe.root_module.addImport("ime_core", jaime.module("ime_core")); // For IME without dictionary
-exe.root_module.addImport("ime_ipadic", jaime.module("ime_ipadic")); // For IME with IPADIC dictionary
+const jaime = b.dependency("jaime", .{
+    .dic_fetch = .unidic, // Download and use UniDic (recommended)
+    // .dic_fetch = .ipadic, // Or use IPADIC
+    // .dic_file = "path/to/custom.bin", // Or use your own dictionary binary
+});
+
+exe.root_module.addImport("kana", jaime.module("kana")); // For simple kana conversion
+exe.root_module.addImport("ime", jaime.module("ime")); // For IME functionality
 ```
+
+## Dictionary Options
+
+There are two ways to use a dictionary with jaime:
+
+### 1. Pre-built Dictionaries
+
+Use the `dic-fetch` option to automatically download and use a pre-built dictionary:
+
+```zig
+const jaime = b.dependency("jaime", .{
+    .dic_fetch = .unidic,
+});
+```
+
+### 2. Custom Dictionary
+
+You can build your own dictionary from source files using the dictionary builder tool. Clone the repository and do:
+
+```bash
+# Build a dictionary from lexicon files
+zig build dictionary \
+    -Ddic-gen-out=custom.bin \
+    -Ddic-gen-lex=path/to/lex/*.csv \
+    -Ddic-gen-char=path/to/char.def \
+    -Ddic-gen-matrix=path/to/matrix.def \
+    -Ddic-gen-unk=path/to/unk.def
+```
+
+```zig
+# Then use the generated dictionary
+const jaime = b.dependency("jaime", .{
+    .dic_file = "custom.bin",
+});
+```
+
+## Licensing Information
+
+Each dictionary has its own license requirements and restrictions that may affect how you can use and redistribute them in your application. The license terms for each dictionary can be found here:
+
+- UniDic: [TODO: Add license link]
+- IPADIC: [TODO: Add license link]
 
 ## Usage
 
-The library provides three modules for different use cases:
+The library provides two main modules:
 
 ### 1. Kana Module - Simple Conversions
 
@@ -98,67 +140,41 @@ defer allocator.free(result2);
 try std.testing.expectEqualStrings("こんにちは", result2);
 ```
 
-### 2. IME IPADIC Module - Full Featured IME
+### 2. IME Module - Full Featured IME
 
-For applications that want to use the full-featured IME with the IPADIC dictionary:
+For applications that want to use the full-featured IME with dictionary support:
 
 ```zig
-const ime_ipadic = @import("ime_ipadic");
+const ime = @import("ime");
 
 // Using owned buffer (with allocator)
-var ime = ime_ipadic.Ime(.owned).init(allocator);
-defer ime.deinit();
+var ime_instance = ime.Ime(.owned).init(allocator);
+defer ime_instance.deinit();
 
 // Using borrowed buffer (fixed size, no allocations)
 var buf: [100]u8 = undefined;
-var ime = ime_ipadic.Ime(.borrowed).init(&buf);
+var ime_instance = ime.Ime(.borrowed).init(&buf);
 
 // Common IME operations
-const result = try ime.insert("k");
-const result2 = try ime.insert("o");
-const result3 = try ime.insert("n");
-try std.testing.expectEqualStrings("こん", ime.input.buf.items());
+const result = try ime_instance.insert("k");
+const result2 = try ime_instance.insert("o");
+const result3 = try ime_instance.insert("n");
+try std.testing.expectEqualStrings("こん", ime_instance.input.buf.items());
 
 // Dictionary Matches
-if (ime.getMatches()) |matches| {
+if (ime_instance.getMatches()) |matches| {
     // Get suggested conversions from the dictionary
     // Returns []WordEntry containing possible word matches
 }
-try ime.applyMatch();    // Apply the best dictionary match to the current input
+try ime_instance.applyMatch();    // Apply the best dictionary match to the current input
 
 // Cursor Movement and Editing
-ime.moveCursorBack(1);   // Move cursor left n positions
-ime.moveCursorForward(1);// Move cursor right n positions
-try ime.insert("y");     // Insert at cursor position
-ime.clear();             // Clear the input buffer
-try ime.deleteBack();    // Delete one character before cursor
-try ime.deleteForward(); // Delete one character after cursor
-```
-
-> [!WARNING]  
-> The IPADIC dictionary is subject to its own license terms. If you need to use a different dictionary or want to avoid IPADIC's license requirements, use the `ime_core` module with your own dictionary implementation.
-
-### 3. IME Core Module - Custom Dictionary
-
-For applications that want to use IME functionality with their own dictionary implementation:
-
-```zig
-const ime_core = @import("ime_core");
-
-// Create your own dictionary loader that implements the required interface
-const MyDictLoader = struct {
-    pub fn loadDictionary(allocator: std.mem.Allocator) !Dictionary {
-        // Your dictionary loading logic here
-    }
-
-    pub fn freeDictionary(dict: *Dictionary) void {
-        // Your dictionary cleanup logic here
-    }
-};
-
-// Use the IME with your custom dictionary
-var ime = ime_core.Ime(MyDictLoader).init(allocator);
-defer ime.deinit();
+ime_instance.moveCursorBack(1);   // Move cursor left n positions
+ime_instance.moveCursorForward(1);// Move cursor right n positions
+try ime_instance.insert("y");     // Insert at cursor position
+ime_instance.clear();             // Clear the input buffer
+try ime_instance.deleteBack();    // Delete one character before cursor
+try ime_instance.deleteForward(); // Delete one character after cursor
 ```
 
 ## WebAssembly Bindings
