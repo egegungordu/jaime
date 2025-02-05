@@ -40,17 +40,21 @@ const Dictionary = enum {
         };
     }
 
-    pub fn url(self: Dictionary) []const u8 {
+    pub fn file_name(self: Dictionary) []const u8 {
         return switch (self) {
-            .unidic => "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/unidic.bin",
-            .ipadic => "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/ipadic.bin",
+            inline else => |val| @tagName(val) ++ ".bin",
         };
     }
 
-    pub fn file_name(self: Dictionary) []const u8 {
+    pub fn archive_name(self: Dictionary) []const u8 {
         return switch (self) {
-            .unidic => "unidic.bin",
-            .ipadic => "ipadic.bin",
+            inline else => |val| comptime val.file_name() ++ ".tar.gz",
+        };
+    }
+
+    pub fn url(self: Dictionary) []const u8 {
+        return switch (self) {
+            inline else => |val| "https://github.com/egegungordu/jaime/releases/download/dictionary-v1/" ++ comptime val.archive_name(),
         };
     }
 };
@@ -140,20 +144,27 @@ pub fn build(b: *std.Build) void {
     }
 
     if (opt_dic_fetch) |dic_fetch| {
-        const download_path = b.path(dic_fetch.file_name()).getPath(b);
-        std.debug.print("Checking dictionary file {s}\n", .{download_path});
+        const download_path = b.path(dic_fetch.archive_name()).getPath(b);
+        const dic_path = b.path(dic_fetch.file_name()).getPath(b);
+        std.debug.print("Checking dictionary file {s}\n", .{dic_path});
         const access: ?void = blk: {
-            std.fs.accessAbsolute(download_path, .{}) catch |err| {
+            std.fs.accessAbsolute(dic_path, .{}) catch |err| {
                 std.debug.print("Dictionary file not found, starting download\n", .{});
                 switch (err) {
                     std.fs.Dir.AccessError.FileNotFound => {
                         std.debug.print("Downloading {s} from {s}\n", .{ @tagName(dic_fetch), dic_fetch.url() });
                         downloadUrl(b, dic_fetch.url(), download_path);
                         std.debug.print("Download completed successfully\n", .{});
+                        std.debug.print("Extracting dictionary from archive\n", .{});
+                        extractDictionary(b, download_path, dic_path);
+                        std.debug.print("Cleaning up archive file\n", .{});
+                        std.fs.deleteFileAbsolute(download_path) catch |er| {
+                            std.debug.print("Warning: Failed to delete archive file: {s}\n", .{@errorName(er)});
+                        };
                     },
                     else => fatal(
                         "Something went wrong while accessing the file {s}: {s}\n",
-                        .{ download_path, @errorName(err) },
+                        .{ dic_path, @errorName(err) },
                     ),
                 }
                 break :blk null;
@@ -252,13 +263,68 @@ fn downloadUrl(b: *std.Build, url: []const u8, out: []const u8) void {
             std.debug.print("Writing {:.2} of data\n", .{std.fmt.fmtIntSizeDec(response.items.len)});
 
             out_file.writer().writeAll(response.items) catch |err| {
-                fatal("Someting went wrong while writing to file: {s}\n", .{@errorName(err)});
+                fatal("Something went wrong while writing to file: {s}\n", .{@errorName(err)});
             };
+        },
+        .not_found => {
+            fatal("404 not found. The link might be broken.\n", .{});
         },
         else => {
             fatal("Fetched the url, but got status: {s}\n", .{@tagName(result.status)});
         },
     }
+}
+
+fn extractDictionary(b: *std.Build, archive_path: []const u8, dic_path: []const u8) void {
+    var archive_file = std.fs.openFileAbsolute(archive_path, .{}) catch |err| {
+        fatal("Unable to open archive '{s}': {s}\n", .{ archive_path, @errorName(err) });
+    };
+    defer archive_file.close();
+
+    // Create a buffer to store decompressed data
+    var decompressed = std.ArrayList(u8).init(b.allocator);
+    defer decompressed.deinit();
+
+    // Decompress gzip data
+    std.compress.gzip.decompress(archive_file.reader(), decompressed.writer()) catch |err| {
+        fatal("Failed to decompress gzip data: {s}\n", .{@errorName(err)});
+    };
+
+    // Create a fixed buffer stream for the decompressed data
+    var decompressed_stream = std.io.fixedBufferStream(decompressed.items);
+
+    // Create tar reader
+    var tar_it = std.tar.iterator(decompressed_stream.reader(), .{
+        .file_name_buffer = b.allocator.alloc(u8, std.fs.MAX_PATH_BYTES) catch |err| {
+            fatal("Failed to allocate file name buffer: {s}\n", .{@errorName(err)});
+        },
+        .link_name_buffer = b.allocator.alloc(u8, std.fs.MAX_PATH_BYTES) catch |err| {
+            fatal("Failed to allocate link name buffer: {s}\n", .{@errorName(err)});
+        },
+    });
+    defer b.allocator.free(tar_it.file_name_buffer);
+    defer b.allocator.free(tar_it.link_name_buffer);
+
+    // Read through tar entries until we find our .bin file
+    while (tar_it.next() catch |err| {
+        fatal("Error reading tar entry: {s}\n", .{@errorName(err)});
+    }) |entry| {
+        const basename = std.fs.path.basename(entry.name);
+        if (std.mem.eql(u8, basename, std.fs.path.basename(dic_path))) {
+            var out_file = std.fs.createFileAbsolute(dic_path, .{}) catch |err| {
+                fatal("Unable to create dictionary file '{s}': {s}\n", .{ dic_path, @errorName(err) });
+            };
+            defer out_file.close();
+
+            std.debug.print("Extracting {s} from archive\n", .{basename});
+
+            entry.writeAll(out_file) catch |err| {
+                fatal("Failed to extract dictionary file: {s}\n", .{@errorName(err)});
+            };
+            return;
+        }
+    }
+    fatal("Dictionary file not found in archive\n", .{});
 }
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
