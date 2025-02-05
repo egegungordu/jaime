@@ -23,6 +23,18 @@ pub fn build(b: *std.Build, opts: Options) void {
         path_opts.addOption([]const u8, "out", out);
     }
 
+    if (b.option(bool, pn.f("compress"), "Enable compression of the dictionary output")) |compress| {
+        path_opts.addOption(bool, "compress", compress);
+    } else {
+        path_opts.addOption(bool, "compress", false); // uncompressed by default
+    }
+
+    if (b.option([]const []const u8, pn.f("include"), "Additional files to include in the dictionary archive")) |include_files| {
+        path_opts.addOption([]const []const u8, "include", include_files);
+    } else {
+        path_opts.addOption([]const []const u8, "include", &[_][]const u8{});
+    }
+
     // TODO: might not be the best idea to include these options as compiler options,
     // maybe put them in the dictionary_builder.zig?
     const padding = " " ** 31;
@@ -46,7 +58,7 @@ pub fn build(b: *std.Build, opts: Options) void {
             path_opts.addOption([]const u8, opt.name, val);
         }
     }
-    dict_builder_exe.root_module.addOptions("paths", path_opts);
+    dict_builder_exe.root_module.addOptions("args", path_opts);
 
     for (opts.imports) |import| {
         dict_builder_exe.root_module.addImport(import.name, import.module);

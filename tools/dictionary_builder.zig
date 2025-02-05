@@ -2,7 +2,8 @@ const std = @import("std");
 const mem = std.mem;
 const fmt = std.fmt;
 
-const matchFiles = @import("glob.zig").matchFiles;
+const glob = @import("glob.zig");
+const SimpleTar = @import("tar.zig").SimpleTar;
 const core = @import("core");
 const datastructs = @import("datastructs");
 const WordEntry = core.WordEntry;
@@ -11,25 +12,27 @@ const LoudsTrieBuilder = datastructs.louds_trie.LoudsTrieBuilder(WordEntry);
 const DictionarySerializer = core.dictionary.DictionarySerializer;
 
 // zig fmt: off
-const paths = @import("paths");
-const prefix = paths.prefix;
+const args = @import("args");
+const prefix = args.prefix;
 
 // Check if required paths are set
-const lex_path = if (@hasDecl(paths, "lex")) paths.lex else {
+const lex_path = if (@hasDecl(args, "lex")) args.lex else {
     @compileError("Missing required lexicon path. Please provide -D" ++ prefix ++ "-lex=<path>");
 };
-const matrix_path = if (@hasDecl(paths, "matrix")) paths.matrix else {
+const matrix_path = if (@hasDecl(args, "matrix")) args.matrix else {
     @compileError("Missing required matrix path. Please provide -D" ++ prefix ++ "-matrix=<path>");
 };
-const char_path = if (@hasDecl(paths, "char")) paths.char else {
+const char_path = if (@hasDecl(args, "char")) args.char else {
     @compileError("Missing required character definition path. Please provide -D" ++ prefix ++ "-char=<path>");
 };
-const unk_path = if (@hasDecl(paths, "unk")) paths.unk else {
+const unk_path = if (@hasDecl(args, "unk")) args.unk else {
     @compileError("Missing required unknown word definition path. Please provide -D" ++ prefix ++ "-unk=<path>");
 };
-const out_path = if (@hasDecl(paths, "out")) paths.out else {
+const out_path = if (@hasDecl(args, "out")) args.out else {
     @compileError("Missing required output path. Please provide -D" ++ prefix ++ "-out=<path>");
 };
+const compress = args.compress;
+const include = args.include;
 // zig fmt: on
 
 /// custom csv field reader to correctly parse quoted fields with ',' in them
@@ -76,15 +79,13 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     var bldr = LoudsTrieBuilder.init(allocator);
-    defer bldr.deinit();
 
     var ltrie: LoudsTrie = undefined;
-    defer ltrie.deinit();
 
     {
         std.debug.print("[lex] start\n", .{});
 
-        var matched_files = matchFiles(allocator, lex_path) catch |err| switch (err) {
+        var matched_files = glob.matchFiles(allocator, std.fs.cwd(), lex_path) catch |err| switch (err) {
             error.InvalidPattern => fatal("invalid lexicon path pattern: {s}", .{lex_path}),
             else => |e| return e,
         };
@@ -138,7 +139,6 @@ pub fn main() !void {
     }
 
     var cost_arr: std.ArrayList(i16) = undefined;
-    defer cost_arr.deinit();
 
     var right_count: u32 = undefined;
 
@@ -164,6 +164,8 @@ pub fn main() !void {
 
         std.debug.print("[matrix] inserting values...\n", .{});
 
+        cost_arr.items.len = left_count * right_count;
+
         while (matrix_line_it.next()) |line| {
             var it = mem.splitScalar(u8, line, ' ');
             const left_id = try std.fmt.parseInt(u32, it.next().?, 10);
@@ -176,12 +178,12 @@ pub fn main() !void {
 
     {
         std.debug.print("[out] start\n", .{});
-        std.debug.print("[out] opening file: {s}...\n", .{out_path});
 
-        var out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
-            fatal("unable to open '{s}': {s}", .{ out_path, @errorName(err) });
+        std.debug.print("[out] creating file: {s}...\n", .{out_path});
+
+        var dic_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+            fatal("unable to open '{s}': {s}\n", .{ out_path, @errorName(err) });
         };
-        defer out_file.close();
 
         std.debug.print("[out] serializing dictionary...\n", .{});
 
@@ -189,15 +191,71 @@ pub fn main() !void {
             .trie = ltrie,
             .costs = cost_arr,
             .right_count = right_count,
-        }, out_file.writer()) catch |err| {
-            fatal("unable to serialize dictionary: {s}", .{@errorName(err)});
+        }, dic_file.writer()) catch |err| {
+            fatal("unable to serialize dictionary: {s}\n", .{@errorName(err)});
+        };
+
+        std.debug.print("[out] freeing up memory...\n", .{});
+
+        // Free up memory for the remaining procedures
+        bldr.deinit();
+        ltrie.deinit();
+        cost_arr.deinit();
+        // Close the dictionary handle so we can open it back up with for tar
+        dic_file.close();
+
+        // Only create tar if we're compressing or have included files
+        const should_tar = compress or include.len > 0;
+        if (!should_tar) {
+            std.debug.print("[out] end\n", .{});
+            return;
+        }
+
+        var files_to_include = std.ArrayList([]const u8).init(allocator);
+        defer files_to_include.deinit();
+
+        // Always include the dictionary file
+        try files_to_include.append(out_path);
+        // Add any additional files
+        try files_to_include.appendSlice(include);
+
+        if (compress) {
+            std.debug.print("[out] creating file: {s}...\n", .{out_path ++ ".tar.gz"});
+
+            var tar_gz_file = std.fs.cwd().createFile(out_path ++ ".tar.gz", .{}) catch |err| {
+                fatal("unable to open '{s}': {s}\n", .{ out_path ++ ".tar.gz", @errorName(err) });
+            };
+            defer tar_gz_file.close();
+
+            var data = std.ArrayList(u8).init(allocator);
+            defer data.deinit();
+
+            try SimpleTar.create(std.fs.cwd(), data.writer(), files_to_include.items);
+
+            var data_fbs = std.io.fixedBufferStream(data.items);
+            try std.compress.gzip.compress(data_fbs.reader(), tar_gz_file.writer(), .{ .level = .best });
+        } else {
+            std.debug.print("[out] creating file: {s}...\n", .{out_path ++ ".tar"});
+
+            var tar_file = std.fs.cwd().createFile(out_path ++ ".tar", .{}) catch |err| {
+                fatal("unable to open '{s}': {s}\n", .{ out_path ++ ".tar", @errorName(err) });
+            };
+            defer tar_file.close();
+
+            try SimpleTar.create(std.fs.cwd(), tar_file.writer(), files_to_include.items);
+        }
+
+        // Only delete the original dictionary file if we created a tar
+        std.debug.print("[out] deleting intermediate file: {s}...\n", .{out_path});
+        std.fs.cwd().deleteFile(out_path) catch |err| {
+            fatal("unable to delete '{s}': {s}\n", .{ out_path, @errorName(err) });
         };
 
         std.debug.print("[out] end\n", .{});
     }
 }
 
-fn fatal(comptime format: []const u8, args: anytype) noreturn {
-    std.debug.print(format, args);
+fn fatal(comptime format: []const u8, arg: anytype) noreturn {
+    std.debug.print(format, arg);
     std.process.exit(1);
 }

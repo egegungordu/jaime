@@ -68,7 +68,7 @@ fn isValidPattern(pattern: []const u8) bool {
 /// Memory Management:
 /// - The caller owns the returned ArrayList and must call deinit() on it
 /// - Each path string in the list is allocated and must be freed by the caller
-pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8) !std.ArrayList([]const u8) {
+pub fn matchFiles(allocator: std.mem.Allocator, dir: std.fs.Dir, pattern: []const u8) !std.ArrayList([]const u8) {
     if (!isValidPattern(pattern)) {
         return GlobError.InvalidPattern;
     }
@@ -91,10 +91,10 @@ pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8) !std.ArrayL
         const file_pattern = if (last_separator) |sep| pattern[sep + 1 ..] else pattern;
 
         const extension = file_pattern[1..];
-        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-        defer dir.close();
+        var dirr = try dir.openDir(dir_path, .{ .iterate = true });
+        defer dirr.close();
 
-        var iter = dir.iterate();
+        var iter = dirr.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind == .file) {
                 if (std.mem.endsWith(u8, entry.name, extension)) {
@@ -108,7 +108,7 @@ pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8) !std.ArrayL
         }
     } else {
         // For direct file paths, just verify the file exists and add it
-        const file = std.fs.cwd().openFile(pattern, .{}) catch |err| switch (err) {
+        const file = dir.openFile(pattern, .{}) catch |err| switch (err) {
             error.FileNotFound => return result,
             else => |e| return e,
         };
@@ -121,17 +121,17 @@ pub fn matchFiles(allocator: std.mem.Allocator, pattern: []const u8) !std.ArrayL
     return result;
 }
 
+const testing = std.testing;
+
 test "matchFiles - direct file" {
-    const allocator = std.testing.allocator;
+    const allocator = testing.allocator;
+    var root = testing.tmpDir(.{});
+    defer root.cleanup();
 
     // Create a test file
-    {
-        const file = try std.fs.cwd().createFile("test.csv", .{});
-        file.close();
-    }
-    defer std.fs.cwd().deleteFile("test.csv") catch {};
+    try createDirAndFile(root.dir, "test.csv");
 
-    const matches = try matchFiles(allocator, "test.csv");
+    const matches = try matchFiles(allocator, root.dir, "test.csv");
     defer {
         for (matches.items) |item| {
             allocator.free(item);
@@ -139,29 +139,21 @@ test "matchFiles - direct file" {
         matches.deinit();
     }
 
-    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
-    try std.testing.expectEqualStrings("test.csv", matches.items[0]);
+    try testing.expectEqual(@as(usize, 1), matches.items.len);
+    try testing.expectEqualStrings("test.csv", matches.items[0]);
 }
 
 test "matchFiles - wildcard" {
     const allocator = std.testing.allocator;
+    var root = testing.tmpDir(.{});
+    defer root.cleanup();
 
     // Create test files
-    {
-        const file1 = try std.fs.cwd().createFile("test1.csv", .{});
-        file1.close();
-        const file2 = try std.fs.cwd().createFile("test2.csv", .{});
-        file2.close();
-        const file3 = try std.fs.cwd().createFile("test3.txt", .{});
-        file3.close();
-    }
-    defer {
-        std.fs.cwd().deleteFile("test1.csv") catch {};
-        std.fs.cwd().deleteFile("test2.csv") catch {};
-        std.fs.cwd().deleteFile("test3.txt") catch {};
-    }
+    try createDirAndFile(root.dir, "test1.csv");
+    try createDirAndFile(root.dir, "test2.csv");
+    try createDirAndFile(root.dir, "test3.txt");
 
-    const matches = try matchFiles(allocator, "/*.csv");
+    const matches = try matchFiles(allocator, root.dir, "/*.csv");
     defer {
         for (matches.items) |item| {
             allocator.free(item);
@@ -178,29 +170,17 @@ test "matchFiles - wildcard" {
 
 test "matchFiles - complex patterns" {
     const allocator = std.testing.allocator;
-
-    // Create test directory structure
-    try std.fs.cwd().makeDir("testdir");
-    defer std.fs.cwd().deleteDir("testdir") catch {};
+    var root = testing.tmpDir(.{});
+    defer root.cleanup();
 
     // Create test files in different locations
-    {
-        const file1 = try std.fs.cwd().createFile("testdir/nested.csv", .{});
-        file1.close();
-        const file2 = try std.fs.cwd().createFile("testdir/other.txt", .{});
-        file2.close();
-        const file3 = try std.fs.cwd().createFile("root.csv", .{});
-        file3.close();
-    }
-    defer {
-        std.fs.cwd().deleteFile("testdir/nested.csv") catch {};
-        std.fs.cwd().deleteFile("testdir/other.txt") catch {};
-        std.fs.cwd().deleteFile("root.csv") catch {};
-    }
+    try createDirAndFile(root.dir, "testdir/nested.csv");
+    try createDirAndFile(root.dir, "testdir/other.txt");
+    try createDirAndFile(root.dir, "testdir/root.csv");
 
     // Test direct file in subdirectory
     {
-        const matches = try matchFiles(allocator, "testdir/nested.csv");
+        const matches = try matchFiles(allocator, root.dir, "testdir/nested.csv");
         defer {
             for (matches.items) |item| {
                 allocator.free(item);
@@ -213,7 +193,7 @@ test "matchFiles - complex patterns" {
 
     // Test wildcard in subdirectory
     {
-        const matches = try matchFiles(allocator, "testdir/*.txt");
+        const matches = try matchFiles(allocator, root.dir, "testdir/*.txt");
         defer {
             for (matches.items) |item| {
                 allocator.free(item);
@@ -226,7 +206,7 @@ test "matchFiles - complex patterns" {
 
     // Test non-existent pattern
     {
-        const matches = try matchFiles(allocator, "testdir/*.nonexistent");
+        const matches = try matchFiles(allocator, root.dir, "testdir/*.nonexistent");
         defer {
             for (matches.items) |item| {
                 allocator.free(item);
@@ -238,7 +218,7 @@ test "matchFiles - complex patterns" {
 
     // Test non-existent direct file
     {
-        const matches = try matchFiles(allocator, "testdir/nonexistent.txt");
+        const matches = try matchFiles(allocator, root.dir, "testdir/nonexistent.txt");
         defer {
             for (matches.items) |item| {
                 allocator.free(item);
@@ -251,20 +231,38 @@ test "matchFiles - complex patterns" {
 
 test "matchFiles - invalid patterns" {
     const allocator = std.testing.allocator;
+    var root = testing.tmpDir(.{});
+    defer root.cleanup();
 
     // Multiple asterisks
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "/*.csv/*.txt"));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "**/*.csv"));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "*.*"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*.csv/*.txt"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "**/*.csv"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "*.*"));
 
     // Asterisk in wrong position
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "/*.csv*"));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "/csv/*."));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "test*file.csv"));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "/*."));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "/*"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*.csv*"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/csv/*."));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "test*file.csv"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*."));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*"));
 
     // Asterisk after directory separator
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "test/*.csv/*"));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, "/*/*.csv"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "test/*.csv/*"));
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*/*.csv"));
+}
+
+/// Creates a file and the directory if needed. Closes it right away
+fn createDirAndFile(dir: std.fs.Dir, file_name: []const u8) !void {
+    const temp_file = dir.createFile(file_name, .{ .exclusive = true }) catch |err| {
+        if (err == error.FileNotFound) {
+            if (std.fs.path.dirname(file_name)) |dir_name| {
+                try dir.makePath(dir_name);
+                const temp_file = try dir.createFile(file_name, .{ .exclusive = true });
+                temp_file.close();
+                return;
+            }
+        }
+        return err;
+    };
+    temp_file.close();
 }
