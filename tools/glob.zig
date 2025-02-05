@@ -24,8 +24,8 @@ fn isValidPattern(pattern: []const u8) bool {
     const asterisk_count = std.mem.count(u8, pattern, "*");
     if (asterisk_count > 1) return false;
     if (asterisk_count == 1) {
-        // If we have an asterisk, it must be in the format "/*.ext" or "*.ext"
-        const last_separator = std.mem.lastIndexOf(u8, pattern, "/");
+        // If we have an asterisk, it must be in the format "/*.ext", "*.ext", "/*", or "*"
+        const last_separator = findLastPathSeparator(pattern);
         const asterisk_pos = std.mem.indexOf(u8, pattern, "*").?;
 
         // Check if there's a path separator, it must come before the asterisk
@@ -34,10 +34,12 @@ fn isValidPattern(pattern: []const u8) bool {
             if (asterisk_pos != sep + 1) return false;
         }
 
-        // Must have an extension after asterisk
-        if (asterisk_pos == pattern.len - 1) return false;
-        if (pattern[asterisk_pos + 1] != '.') return false;
-        if (asterisk_pos + 2 >= pattern.len) return false; // Must have chars after dot
+        // Pattern can either end with asterisk or must have an extension after asterisk
+        if (asterisk_pos < pattern.len - 1) {
+            // If not ending with asterisk, must have proper extension
+            if (pattern[asterisk_pos + 1] != '.') return false;
+            if (asterisk_pos + 2 >= pattern.len) return false; // Must have chars after dot
+        }
     }
     return true;
 }
@@ -82,7 +84,7 @@ pub fn matchFiles(allocator: std.mem.Allocator, dir: std.fs.Dir, pattern: []cons
     }
 
     // Find the last path separator
-    const last_separator = std.mem.lastIndexOf(u8, pattern, "/");
+    const last_separator = findLastPathSeparator(pattern);
     const has_wildcard = std.mem.indexOf(u8, pattern, "*") != null;
 
     if (has_wildcard) {
@@ -90,14 +92,22 @@ pub fn matchFiles(allocator: std.mem.Allocator, dir: std.fs.Dir, pattern: []cons
         const dir_path = if (last_separator) |sep| pattern[0..sep] else ".";
         const file_pattern = if (last_separator) |sep| pattern[sep + 1 ..] else pattern;
 
-        const extension = file_pattern[1..];
+        const asterisk_pos = std.mem.indexOf(u8, file_pattern, "*").?;
+        const match_all = asterisk_pos == file_pattern.len - 1;
+        const extension = if (!match_all) file_pattern[asterisk_pos + 1 ..] else "";
+
         var dirr = try dir.openDir(dir_path, .{ .iterate = true });
         defer dirr.close();
 
         var iter = dirr.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind == .file) {
-                if (std.mem.endsWith(u8, entry.name, extension)) {
+                const should_include = if (match_all)
+                    true
+                else
+                    std.mem.endsWith(u8, entry.name, extension);
+
+                if (should_include) {
                     const full_path = if (std.mem.eql(u8, dir_path, "."))
                         try allocator.dupe(u8, entry.name)
                     else
@@ -119,6 +129,16 @@ pub fn matchFiles(allocator: std.mem.Allocator, dir: std.fs.Dir, pattern: []cons
     }
 
     return result;
+}
+
+fn findLastPathSeparator(path: []const u8) ?usize {
+    var last_sep: ?usize = null;
+    for (path, 0..) |c, i| {
+        if (c == '/' or c == '\\') {
+            last_sep = i;
+        }
+    }
+    return last_sep;
 }
 
 const testing = std.testing;
@@ -153,18 +173,47 @@ test "matchFiles - wildcard" {
     try createDirAndFile(root.dir, "test2.csv");
     try createDirAndFile(root.dir, "test3.txt");
 
-    const matches = try matchFiles(allocator, root.dir, "/*.csv");
-    defer {
-        for (matches.items) |item| {
-            allocator.free(item);
+    // Test extension matching
+    {
+        const matches = try matchFiles(allocator, root.dir, "/*.csv");
+        defer {
+            for (matches.items) |item| {
+                allocator.free(item);
+            }
+            matches.deinit();
         }
-        matches.deinit();
+
+        try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+        // Note: The exact order might vary by filesystem
+        for (matches.items) |item| {
+            try std.testing.expect(std.mem.endsWith(u8, item, ".csv"));
+        }
     }
 
-    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
-    // Note: The exact order might vary by filesystem
-    for (matches.items) |item| {
-        try std.testing.expect(std.mem.endsWith(u8, item, ".csv"));
+    // Test matching all files
+    {
+        const matches = try matchFiles(allocator, root.dir, "/*");
+        defer {
+            for (matches.items) |item| {
+                allocator.free(item);
+            }
+            matches.deinit();
+        }
+
+        try std.testing.expectEqual(@as(usize, 3), matches.items.len);
+    }
+
+    // Test matching all files in current directory
+    {
+        const matches = try matchFiles(allocator, root.dir, "*");
+        defer {
+            for (matches.items) |item| {
+                allocator.free(item);
+            }
+            matches.deinit();
+        }
+
+        try std.testing.expectEqual(@as(usize, 3), matches.items.len);
     }
 }
 
@@ -243,10 +292,9 @@ test "matchFiles - invalid patterns" {
     try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*.csv*"));
     try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/csv/*."));
     try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "test*file.csv"));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*."));
-    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*"));
 
-    // Asterisk after directory separator
+    // Invalid directory patterns
+    try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*/"));
     try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "test/*.csv/*"));
     try std.testing.expectError(GlobError.InvalidPattern, matchFiles(allocator, root.dir, "/*/*.csv"));
 }

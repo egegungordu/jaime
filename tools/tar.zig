@@ -23,8 +23,6 @@ const assert = std.debug.assert;
 /// ```
 ///
 /// Note: This is a simplified implementation focused on basic file archiving.
-/// For more complex needs (like long filenames, symlinks, or directories),
-/// consider using the standard library's tar implementation.
 /// A simple tar implementation that only handles file concatenation.
 /// Does not support directories, symlinks, or other special files.
 pub const SimpleTar = struct {

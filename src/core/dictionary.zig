@@ -30,7 +30,7 @@ pub const Dictionary = struct {
     }
 };
 
-// TODO: take a look at decompressor/compressor https://codeberg.org/atman/zg/src/branch/master/src/CaseData.zig
+// TODO: could also write all sizes for all containers, so we can maybe deserialize more efficiently? (HOW?)
 
 /// A serializer/deserializer for Dictionary.
 /// The deserializer assumes that the lifetime of the reader's underlying buffer will outlive

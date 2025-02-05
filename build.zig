@@ -85,21 +85,26 @@ pub fn build(b: *std.Build) void {
     //
     // The dictionary builder needs the following arguments to generate
     // a binary to be used in this program:
-    // -Ddic-gen-out
+    // --out
     //      Output name for the dictionary
-    // -Ddic-gen-lex
+    // --lex
     //      Lexicon used for the dictionary generation (*.csv). Accepts simple
     //      glob pattern like "/*.csv" or "dir/*.csv" to match multiple csv files
-    // -Ddic-gen-char
+    // --char
     //      Character category map used for the dictionary generation (char.def)
-    // -Ddic-gen-matrix
+    // --matrix
     //      Cost matrix used for the dictionary generation (matrix.def)
-    // -Ddic-gen-unk
+    // --unk
     //      Unknown word definitions used for the dictionary generation (matrix.def)
+    //
+    // Can also accept the following optional arguments
+    // --compress
+    //      Create a tar archive and compress it with gzip
+    // --include
+    //      Additional files to include in the tar archive (LICENSE etc.)
 
     tools.build(b, .{
         .src_dir = "tools",
-        .opt_prefix = "dic-gen",
         .imports = &.{
             .{ .name = "datastructs", .module = mod_datastructs },
             .{ .name = "core", .module = mod_core },

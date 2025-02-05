@@ -11,29 +11,90 @@ const LoudsTrie = datastructs.louds_trie.LoudsTrie(WordEntry);
 const LoudsTrieBuilder = datastructs.louds_trie.LoudsTrieBuilder(WordEntry);
 const DictionarySerializer = core.dictionary.DictionarySerializer;
 
-// zig fmt: off
-const args = @import("args");
-const prefix = args.prefix;
+const Config = struct {
+    lex_path: []const u8,
+    matrix_path: []const u8,
+    char_path: []const u8,
+    unk_path: []const u8,
+    out_path: []const u8,
+    compress: bool,
+    include: []const []const u8,
 
-// Check if required paths are set
-const lex_path = if (@hasDecl(args, "lex")) args.lex else {
-    @compileError("Missing required lexicon path. Please provide -D" ++ prefix ++ "-lex=<path>");
+    pub fn deinit(self: *Config, allocator: mem.Allocator) void {
+        for (self.include) |path| {
+            allocator.free(path);
+        }
+        allocator.free(self.include);
+    }
 };
-const matrix_path = if (@hasDecl(args, "matrix")) args.matrix else {
-    @compileError("Missing required matrix path. Please provide -D" ++ prefix ++ "-matrix=<path>");
-};
-const char_path = if (@hasDecl(args, "char")) args.char else {
-    @compileError("Missing required character definition path. Please provide -D" ++ prefix ++ "-char=<path>");
-};
-const unk_path = if (@hasDecl(args, "unk")) args.unk else {
-    @compileError("Missing required unknown word definition path. Please provide -D" ++ prefix ++ "-unk=<path>");
-};
-const out_path = if (@hasDecl(args, "out")) args.out else {
-    @compileError("Missing required output path. Please provide -D" ++ prefix ++ "-out=<path>");
-};
-const compress = args.compress;
-const include = args.include;
-// zig fmt: on
+
+fn parseArgs(allocator: mem.Allocator) !Config {
+    var args_it = try std.process.argsWithAllocator(allocator);
+    defer args_it.deinit();
+
+    // Skip executable name
+    _ = args_it.skip();
+
+    var config = Config{
+        .lex_path = "",
+        .matrix_path = "",
+        .char_path = "",
+        .unk_path = "",
+        .out_path = "",
+        .compress = false,
+        .include = &[_][]const u8{},
+    };
+
+    var include_list = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (include_list.items) |path| {
+            allocator.free(path);
+        }
+        include_list.deinit();
+    }
+
+    while (args_it.next()) |arg| {
+        if (mem.eql(u8, arg, "--lex")) {
+            const val = args_it.next() orelse fatal("Missing value for --lex\n", .{});
+            config.lex_path = try allocator.dupe(u8, val);
+        } else if (mem.eql(u8, arg, "--matrix")) {
+            const val = args_it.next() orelse fatal("Missing value for --matrix\n", .{});
+            config.matrix_path = try allocator.dupe(u8, val);
+        } else if (mem.eql(u8, arg, "--char")) {
+            const val = args_it.next() orelse fatal("Missing value for --char\n", .{});
+            config.char_path = try allocator.dupe(u8, val);
+        } else if (mem.eql(u8, arg, "--unk")) {
+            const val = args_it.next() orelse fatal("Missing value for --unk\n", .{});
+            config.unk_path = try allocator.dupe(u8, val);
+        } else if (mem.eql(u8, arg, "--out")) {
+            const val = args_it.next() orelse fatal("Missing value for --out\n", .{});
+            config.out_path = try allocator.dupe(u8, val);
+        } else if (mem.eql(u8, arg, "--compress")) {
+            config.compress = true;
+        } else if (std.mem.eql(u8, arg, "--include")) {
+            const pattern = args_it.next() orelse {
+                fatal("Missing value for --include\n", .{});
+            };
+            // Process glob pattern for include files
+            const matched_files = glob.matchFiles(allocator, std.fs.cwd(), pattern) catch |err| {
+                fatal("Failed to match files with pattern (--include) '{s}': {s}\n", .{ pattern, @errorName(err) });
+            };
+            if (matched_files.items.len == 0) {
+                fatal("No files found matching pattern (--include): {s}\n", .{pattern});
+            }
+            try include_list.appendSlice(matched_files.items);
+        }
+    }
+
+    if (config.lex_path.len == 0) fatal("Missing required lexicon path. Use --lex <path>\n", .{});
+    if (config.matrix_path.len == 0) fatal("Missing required connection matrix path. Use --matrix <path>\n", .{});
+    if (config.char_path.len == 0) fatal("Missing required character definition path. Use --char <path>\n", .{});
+    if (config.unk_path.len == 0) fatal("Missing required unknown word definition path. Use --unk <path>\n", .{});
+    if (config.out_path.len == 0) fatal("Missing required output path. Use --out <path>\n", .{});
+
+    config.include = try include_list.toOwnedSlice();
+    return config;
+}
 
 /// custom csv field reader to correctly parse quoted fields with ',' in them
 /// only the first field in the lexicons use this
@@ -66,43 +127,28 @@ fn getNextCsvField(it: *mem.SplitIterator(u8, .scalar)) ?[]const u8 {
     return null; // malformed CSV, no closing quote found
 }
 
-// TODO: use mmap / CreateFileMapping to make reading faster?
-// TODO: all dictionary has to fit in memory, currently we load all files into memory and dont free them until the end
-// 1. possibly serialize on the go, and deallocate files
-
-const max_allocate_size = 9999999999;
-
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var bldr = LoudsTrieBuilder.init(allocator);
+    const config = try parseArgs(allocator);
 
+    var bldr = LoudsTrieBuilder.init(allocator);
     var ltrie: LoudsTrie = undefined;
 
     {
         std.debug.print("[lex] start\n", .{});
 
-        var matched_files = glob.matchFiles(allocator, std.fs.cwd(), lex_path) catch |err| switch (err) {
-            error.InvalidPattern => fatal("invalid lexicon path pattern: {s}", .{lex_path}),
-            else => |e| return e,
-        };
-        defer {
-            for (matched_files.items) |item| {
-                allocator.free(item);
-            }
-            matched_files.deinit();
+        // Process glob pattern for lexicon files
+        const lex_files = try glob.matchFiles(allocator, std.fs.cwd(), config.lex_path);
+        if (lex_files.items.len == 0) {
+            fatal("No lexicon files found matching pattern: {s}\n", .{config.lex_path});
         }
 
-        if (matched_files.items.len == 0) {
-            fatal("no lexicon files found matching pattern: {s}", .{lex_path});
-        }
+        std.debug.print("[lex] found {d} lexicon file(s)\n", .{lex_files.items.len});
 
-        std.debug.print("[lex] found {d} lexicon file(s)\n", .{matched_files.items.len});
-
-        for (matched_files.items) |file_path| {
+        for (lex_files.items) |file_path| {
             std.debug.print("[lex] processing {s}...\n", .{file_path});
 
             var input_file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
@@ -110,7 +156,8 @@ pub fn main() !void {
             };
             defer input_file.close();
 
-            const file = try input_file.reader().readAllAlloc(allocator, max_allocate_size);
+            const file = try input_file.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+
             var lex_line_it = mem.tokenizeScalar(u8, file, '\n');
             while (lex_line_it.next()) |line| {
                 var it = mem.splitScalar(u8, line, ',');
@@ -132,9 +179,7 @@ pub fn main() !void {
         }
 
         std.debug.print("[lex] building louds trie index...\n", .{});
-
         ltrie = try bldr.build();
-
         std.debug.print("[lex] end\n", .{});
     }
 
@@ -145,12 +190,13 @@ pub fn main() !void {
     {
         std.debug.print("[matrix] start\n", .{});
 
-        var input_file = std.fs.cwd().openFile(matrix_path, .{}) catch |err| {
-            fatal("unable to open '{s}': {s}", .{ matrix_path, @errorName(err) });
+        var input_file = std.fs.cwd().openFile(config.matrix_path, .{}) catch |err| {
+            fatal("unable to open '{s}': {s}", .{ config.matrix_path, @errorName(err) });
         };
         defer input_file.close();
 
-        const file = try input_file.reader().readAllAlloc(allocator, max_allocate_size);
+        const file = try input_file.reader().readAllAlloc(allocator, std.math.maxInt(usize));
+
         var matrix_line_it = mem.tokenizeScalar(u8, file, '\n');
 
         var first_line_it = mem.tokenizeScalar(u8, matrix_line_it.next().?, ' ');
@@ -179,11 +225,19 @@ pub fn main() !void {
     {
         std.debug.print("[out] start\n", .{});
 
-        std.debug.print("[out] creating file: {s}...\n", .{out_path});
+        const tar_path = try std.fmt.allocPrint(allocator, "{s}.tar", .{config.out_path});
+        const tar_gz_path = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{config.out_path});
 
-        var dic_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
-            fatal("unable to open '{s}': {s}\n", .{ out_path, @errorName(err) });
+        std.debug.print("[out] creating file: {s}...\n", .{config.out_path});
+
+        var dic_file = std.fs.cwd().createFile(config.out_path, .{}) catch |err| {
+            fatal("unable to open '{s}': {s}\n", .{ config.out_path, @errorName(err) });
         };
+        errdefer dic_file.close();
+
+        const dic_writer = dic_file.writer();
+
+        var buffered_writer = std.io.BufferedWriter(4096 * 4, @TypeOf(dic_writer)){ .unbuffered_writer = dic_writer };
 
         std.debug.print("[out] serializing dictionary...\n", .{});
 
@@ -191,64 +245,70 @@ pub fn main() !void {
             .trie = ltrie,
             .costs = cost_arr,
             .right_count = right_count,
-        }, dic_file.writer()) catch |err| {
+        }, buffered_writer.writer()) catch |err| {
             fatal("unable to serialize dictionary: {s}\n", .{@errorName(err)});
         };
 
+        try buffered_writer.flush();
+
         std.debug.print("[out] freeing up memory...\n", .{});
 
-        // Free up memory for the remaining procedures
-        bldr.deinit();
-        ltrie.deinit();
-        cost_arr.deinit();
         // Close the dictionary handle so we can open it back up with for tar
         dic_file.close();
 
         // Only create tar if we're compressing or have included files
-        const should_tar = compress or include.len > 0;
+        const should_tar = config.compress or config.include.len > 0;
         if (!should_tar) {
             std.debug.print("[out] end\n", .{});
             return;
         }
 
         var files_to_include = std.ArrayList([]const u8).init(allocator);
-        defer files_to_include.deinit();
 
         // Always include the dictionary file
-        try files_to_include.append(out_path);
+        try files_to_include.append(config.out_path);
         // Add any additional files
-        try files_to_include.appendSlice(include);
+        try files_to_include.appendSlice(config.include);
 
-        if (compress) {
-            std.debug.print("[out] creating file: {s}...\n", .{out_path ++ ".tar.gz"});
+        if (config.compress) {
+            std.debug.print("[out] creating file: {s}...\n", .{tar_gz_path});
 
-            var tar_gz_file = std.fs.cwd().createFile(out_path ++ ".tar.gz", .{}) catch |err| {
-                fatal("unable to open '{s}': {s}\n", .{ out_path ++ ".tar.gz", @errorName(err) });
+            var tar_gz_file = std.fs.cwd().createFile(tar_gz_path, .{}) catch |err| {
+                fatal("unable to open '{s}': {s}\n", .{ tar_gz_path, @errorName(err) });
             };
             defer tar_gz_file.close();
 
             var data = std.ArrayList(u8).init(allocator);
-            defer data.deinit();
 
             try SimpleTar.create(std.fs.cwd(), data.writer(), files_to_include.items);
-
             var data_fbs = std.io.fixedBufferStream(data.items);
-            try std.compress.gzip.compress(data_fbs.reader(), tar_gz_file.writer(), .{ .level = .best });
-        } else {
-            std.debug.print("[out] creating file: {s}...\n", .{out_path ++ ".tar"});
 
-            var tar_file = std.fs.cwd().createFile(out_path ++ ".tar", .{}) catch |err| {
-                fatal("unable to open '{s}': {s}\n", .{ out_path ++ ".tar", @errorName(err) });
+            const tar_gz_writer = tar_gz_file.writer();
+            var bw = std.io.BufferedWriter(4096 * 4, @TypeOf(tar_gz_writer)){ .unbuffered_writer = tar_gz_writer };
+
+            // TODO: look into xz or lzma compression (should have better compression). Not implemented by the std (they only have decompression)
+            try std.compress.gzip.compress(data_fbs.reader(), bw.writer(), .{ .level = .fast });
+
+            try bw.flush();
+        } else {
+            std.debug.print("[out] creating file: {s}...\n", .{tar_path});
+
+            var tar_file = std.fs.cwd().createFile(tar_path, .{}) catch |err| {
+                fatal("unable to open '{s}': {s}\n", .{ tar_path, @errorName(err) });
             };
             defer tar_file.close();
 
-            try SimpleTar.create(std.fs.cwd(), tar_file.writer(), files_to_include.items);
+            const tar_writer = tar_file.writer();
+            var bw = std.io.BufferedWriter(4096 * 4, @TypeOf(tar_writer)){ .unbuffered_writer = tar_writer };
+
+            try SimpleTar.create(std.fs.cwd(), bw.writer(), files_to_include.items);
+
+            try bw.flush();
         }
 
-        // Only delete the original dictionary file if we created a tar
-        std.debug.print("[out] deleting intermediate file: {s}...\n", .{out_path});
-        std.fs.cwd().deleteFile(out_path) catch |err| {
-            fatal("unable to delete '{s}': {s}\n", .{ out_path, @errorName(err) });
+        std.debug.print("[out] deleting intermediate file: {s}...\n", .{config.out_path});
+        std.fs.cwd().deleteFile(config.out_path) catch |err| {
+            fatal("unable to delete '{s}': {s}\n", .{ config.out_path, @errorName(err) });
         };
 
         std.debug.print("[out] end\n", .{});
