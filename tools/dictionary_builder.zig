@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const fmt = std.fmt;
+const log = std.log;
 
 const glob = @import("glob.zig");
 const SimpleTar = @import("tar.zig").SimpleTar;
@@ -138,7 +139,7 @@ pub fn main() !void {
     var ltrie: LoudsTrie = undefined;
 
     {
-        std.debug.print("[lex] start\n", .{});
+        log.info("starting lexicon processing", .{});
 
         // Process glob pattern for lexicon files
         const lex_files = try glob.matchFiles(allocator, std.fs.cwd(), config.lex_path);
@@ -146,10 +147,10 @@ pub fn main() !void {
             fatal("No lexicon files found matching pattern: {s}\n", .{config.lex_path});
         }
 
-        std.debug.print("[lex] found {d} lexicon file(s)\n", .{lex_files.items.len});
+        log.info("found {d} lexicon file(s)", .{lex_files.items.len});
 
         for (lex_files.items) |file_path| {
-            std.debug.print("[lex] processing {s}...\n", .{file_path});
+            log.info("processing {s}...", .{file_path});
 
             var input_file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
                 fatal("unable to open '{s}': {s}", .{ file_path, @errorName(err) });
@@ -178,9 +179,9 @@ pub fn main() !void {
             }
         }
 
-        std.debug.print("[lex] building louds trie index...\n", .{});
+        log.info("building louds trie index...", .{});
         ltrie = try bldr.build();
-        std.debug.print("[lex] end\n", .{});
+        log.info("lexicon processing complete", .{});
     }
 
     var cost_arr: std.ArrayList(i16) = undefined;
@@ -188,7 +189,7 @@ pub fn main() !void {
     var right_count: u32 = undefined;
 
     {
-        std.debug.print("[matrix] start\n", .{});
+        log.info("starting matrix processing", .{});
 
         var input_file = std.fs.cwd().openFile(config.matrix_path, .{}) catch |err| {
             fatal("unable to open '{s}': {s}", .{ config.matrix_path, @errorName(err) });
@@ -203,12 +204,12 @@ pub fn main() !void {
         const left_count = try std.fmt.parseInt(u32, first_line_it.next().?, 10);
         right_count = try std.fmt.parseInt(u32, first_line_it.next().?, 10);
 
-        std.debug.print("[matrix] found {d} left, {d} right ids...\n", .{ left_count, right_count });
-        std.debug.print("[matrix] initializing arraylist with {d} capacity...\n", .{left_count * right_count});
+        log.info("found {d} left, {d} right ids...", .{ left_count, right_count });
+        log.info("initializing arraylist with {d} capacity...", .{left_count * right_count});
 
         cost_arr = try std.ArrayList(i16).initCapacity(allocator, left_count * right_count);
 
-        std.debug.print("[matrix] inserting values...\n", .{});
+        log.info("inserting values...", .{});
 
         cost_arr.items.len = left_count * right_count;
 
@@ -219,16 +220,16 @@ pub fn main() !void {
             cost_arr.items[left_id * right_count + right_id] = try std.fmt.parseInt(i16, it.next().?, 10);
         }
 
-        std.debug.print("[matrix] end\n", .{});
+        log.info("matrix processing complete", .{});
     }
 
     {
-        std.debug.print("[out] start\n", .{});
+        log.info("starting output processing", .{});
 
         const tar_path = try std.fmt.allocPrint(allocator, "{s}.tar", .{config.out_path});
         const tar_gz_path = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{config.out_path});
 
-        std.debug.print("[out] creating file: {s}...\n", .{config.out_path});
+        log.info("creating file: {s}...", .{config.out_path});
 
         var dic_file = std.fs.cwd().createFile(config.out_path, .{}) catch |err| {
             fatal("unable to open '{s}': {s}\n", .{ config.out_path, @errorName(err) });
@@ -239,7 +240,7 @@ pub fn main() !void {
 
         var buffered_writer = std.io.BufferedWriter(4096 * 4, @TypeOf(dic_writer)){ .unbuffered_writer = dic_writer };
 
-        std.debug.print("[out] serializing dictionary...\n", .{});
+        log.info("serializing dictionary...", .{});
 
         DictionarySerializer.serialize(&.{
             .trie = ltrie,
@@ -251,7 +252,7 @@ pub fn main() !void {
 
         try buffered_writer.flush();
 
-        std.debug.print("[out] freeing up memory...\n", .{});
+        log.info("freeing up memory...", .{});
 
         // Close the dictionary handle so we can open it back up with for tar
         dic_file.close();
@@ -259,7 +260,7 @@ pub fn main() !void {
         // Only create tar if we're compressing or have included files
         const should_tar = config.compress or config.include.len > 0;
         if (!should_tar) {
-            std.debug.print("[out] end\n", .{});
+            log.info("output processing complete", .{});
             return;
         }
 
@@ -271,7 +272,7 @@ pub fn main() !void {
         try files_to_include.appendSlice(config.include);
 
         if (config.compress) {
-            std.debug.print("[out] creating file: {s}...\n", .{tar_gz_path});
+            log.info("creating file: {s}...", .{tar_gz_path});
 
             var tar_gz_file = std.fs.cwd().createFile(tar_gz_path, .{}) catch |err| {
                 fatal("unable to open '{s}': {s}\n", .{ tar_gz_path, @errorName(err) });
@@ -291,7 +292,7 @@ pub fn main() !void {
 
             try bw.flush();
         } else {
-            std.debug.print("[out] creating file: {s}...\n", .{tar_path});
+            log.info("creating file: {s}...", .{tar_path});
 
             var tar_file = std.fs.cwd().createFile(tar_path, .{}) catch |err| {
                 fatal("unable to open '{s}': {s}\n", .{ tar_path, @errorName(err) });
@@ -306,16 +307,16 @@ pub fn main() !void {
             try bw.flush();
         }
 
-        std.debug.print("[out] deleting intermediate file: {s}...\n", .{config.out_path});
+        log.info("deleting intermediate file: {s}...", .{config.out_path});
         std.fs.cwd().deleteFile(config.out_path) catch |err| {
             fatal("unable to delete '{s}': {s}\n", .{ config.out_path, @errorName(err) });
         };
 
-        std.debug.print("[out] end\n", .{});
+        log.info("output processing complete", .{});
     }
 }
 
 fn fatal(comptime format: []const u8, arg: anytype) noreturn {
-    std.debug.print(format, arg);
+    log.err(format, arg);
     std.process.exit(1);
 }
